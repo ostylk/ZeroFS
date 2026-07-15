@@ -181,6 +181,8 @@ pub async fn connect_rpc_client(config_path: &Path) -> Result<RpcClient> {
 
     let rpc_config = settings
         .servers
+        .as_ref()
+        .context("No servers configured in config files")?
         .rpc
         .as_ref()
         .context("RPC server not configured in config file")?;

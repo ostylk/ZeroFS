@@ -133,7 +133,8 @@ impl WalConfig {
 pub struct Settings {
     pub cache: CacheConfig,
     pub storage: StorageConfig,
-    pub servers: ServerConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub servers: Option<ServerConfig>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub filesystem: Option<FilesystemConfig>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -590,7 +591,7 @@ impl GcConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Default, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1042,7 +1043,7 @@ impl Settings {
                 encryption_password: "${ZEROFS_PASSWORD}".to_string(),
                 storage_class: None,
             },
-            servers: ServerConfig {
+            servers: Some(ServerConfig {
                 nfs: Some(NfsConfig {
                     addresses: Some(default_nfs_addresses()),
                 }),
@@ -1063,7 +1064,7 @@ impl Settings {
                     uid: 1000,
                     gid: 1000,
                 }),
-            },
+            }),
             filesystem: None,
             lsm: None,
             gc: None,
@@ -1351,7 +1352,7 @@ unix_socket = "${ZEROFS_TEST_HOME}/zerofs.sock"
             settings.storage.url,
             format!("file://{}/data", home_dir.display())
         );
-        if let Some(ninep) = settings.servers.ninep {
+        if let Some(ninep) = settings.servers.unwrap().ninep {
             assert_eq!(ninep.unix_socket.unwrap(), home_dir.join("zerofs.sock"));
         } else {
             panic!("Expected 9P config");
@@ -1974,7 +1975,7 @@ addresses = ["${ZEROFS_TEST_NFS_ADDR}"]
 addresses = ["${ZEROFS_TEST_PROM_ADDR}"]
 "#;
         let settings = write_and_load(content).unwrap();
-        let nfs = settings.servers.nfs.unwrap().addresses.unwrap();
+        let nfs = settings.servers.unwrap().nfs.unwrap().addresses.unwrap();
         assert!(nfs.contains(&"0.0.0.0:2049".parse().unwrap()));
         let prom = settings.prometheus.unwrap().addresses;
         assert!(prom.contains(&"0.0.0.0:9091".parse().unwrap()));
@@ -2004,6 +2005,7 @@ addresses = ["${ZEROFS_TEST_HOST}:2049", "127.0.0.1:${ZEROFS_TEST_PORT}"]
         let nfs = write_and_load(content)
             .unwrap()
             .servers
+            .unwrap()
             .nfs
             .unwrap()
             .addresses
@@ -2048,6 +2050,7 @@ addresses = ["${ZEROFS_TEST_BAD_ADDR}"]
         assert!(
             settings
                 .servers
+                .unwrap()
                 .nfs
                 .unwrap()
                 .addresses

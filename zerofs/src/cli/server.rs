@@ -16,6 +16,7 @@ use foyer::{
     BlockEngineConfig, DeviceBuilder, FsDeviceBuilder, HybridCacheBuilder, PsyncIoEngineConfig,
     S3FifoConfig, Spawner,
 };
+use libsystemd::activation::IsType;
 use libsystemd::daemon::{NotifyState, booted as systemd_booted, notify as systemd_notify};
 use slatedb::admin::AdminBuilder;
 use slatedb::config::GarbageCollectorDirectoryOptions;
@@ -24,12 +25,13 @@ use slatedb::db_cache::foyer_hybrid::FoyerHybridCache;
 use slatedb::object_store::path::Path;
 use slatedb::{BlockTransformer, CompactorBuilder, DbBuilder, DbReader};
 use slatedb_common::metrics::DefaultMetricsRecorder;
+use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use zerofs_nfsserve::tcp::NFSTcp;
 
 /// Parse a WAL config into an object store rooted at the full URL path.
@@ -132,13 +134,9 @@ async fn start_ninep_servers(
     config: Option<&NinePConfig>,
     shutdown: CancellationToken,
 ) -> Result<Vec<JoinHandle<Result<(), std::io::Error>>>> {
-    let config = match config {
-        Some(c) => c,
-        None => return Ok(Vec::new()),
-    };
     let mut handles = Vec::new();
 
-    if let Some(addresses) = &config.addresses {
+    if let Some(addresses) = config.and_then(|cfg| cfg.addresses.as_ref()) {
         for addr in addresses {
             info!("Starting 9P server on {}", addr);
             let ninep_tcp_server = crate::ninep::NinePServer::new(Arc::clone(&fs), *addr).await?;
@@ -149,7 +147,7 @@ async fn start_ninep_servers(
         }
     }
 
-    if let Some(socket_path) = config.unix_socket.as_ref() {
+    if let Some(socket_path) = config.and_then(|cfg| cfg.unix_socket.as_ref()) {
         info!(
             "Starting 9P server on Unix socket: {}",
             socket_path.display()
@@ -161,6 +159,36 @@ async fn start_ninep_servers(
         handles.push(spawn_named("9p-unix-server", async move {
             ninep_unix_server.start(shutdown_clone).await
         }));
+    }
+
+    for (fd, _) in libsystemd::activation::receive_descriptors_with_names(false)?
+        .into_iter()
+        .filter(|(_, name)| name == "ninep")
+    {
+        if fd.is_inet() {
+            info!("Starting 9P server on systemd socket");
+            let ninep_tcp_server =
+                crate::ninep::NinePServer::new_with_fd(Arc::clone(&fs), unsafe {
+                    OwnedFd::from_raw_fd(fd.into_raw_fd())
+                })?;
+            let shutdown_clone = shutdown.clone();
+            handles.push(spawn_named("9p-server", async move {
+                ninep_tcp_server.start(shutdown_clone).await
+            }));
+        } else if fd.is_unix() {
+            info!("Starting 9P server on systemd unix socket");
+            let ninep_unix_fs = Arc::clone(&fs);
+            let ninep_unix_server =
+                crate::ninep::NinePServer::new_unix_with_fd(ninep_unix_fs, unsafe {
+                    OwnedFd::from_raw_fd(fd.into_raw_fd())
+                })?;
+            let shutdown_clone = shutdown.clone();
+            handles.push(spawn_named("9p-unix-server", async move {
+                ninep_unix_server.start(shutdown_clone).await
+            }));
+        } else {
+            warn!("Unknown fd {} for 9p server", fd.into_raw_fd());
+        }
     }
 
     Ok(handles)
@@ -199,13 +227,9 @@ async fn start_nbd_servers(
     config: Option<&NbdConfig>,
     shutdown: CancellationToken,
 ) -> Result<Vec<JoinHandle<Result<(), std::io::Error>>>> {
-    let config = match config {
-        Some(c) => c,
-        None => return Ok(Vec::new()),
-    };
     let mut handles = Vec::new();
 
-    if let Some(addresses) = &config.addresses {
+    if let Some(addresses) = config.and_then(|cfg| cfg.addresses.as_ref()) {
         for addr in addresses {
             info!(
                 "Starting NBD server on {} (devices dynamically discovered from .nbd/)",
@@ -223,7 +247,7 @@ async fn start_nbd_servers(
         }
     }
 
-    if let Some(socket_path) = config.unix_socket.as_ref() {
+    if let Some(socket_path) = config.and_then(|cfg| cfg.unix_socket.as_ref()) {
         info!(
             "Starting NBD server on Unix socket {} (devices dynamically discovered from .nbd/)",
             socket_path.display()
@@ -237,6 +261,46 @@ async fn start_nbd_servers(
                 Ok(())
             }
         }));
+    }
+
+    for (fd, _) in libsystemd::activation::receive_descriptors_with_names(false)?
+        .into_iter()
+        .filter(|(_, name)| name == "nbd")
+    {
+        if fd.is_inet() {
+            info!(
+                "Starting NBD server on systemd socket (devices dynamically discovered from .nbd/)"
+            );
+
+            let nbd_tcp_server = NBDServer::new_tcp_with_fd(Arc::clone(&fs), unsafe {
+                OwnedFd::from_raw_fd(fd.into_raw_fd())
+            })?;
+            let shutdown_clone = shutdown.clone();
+            handles.push(spawn_named("nbd-server", async move {
+                if let Err(e) = nbd_tcp_server.start(shutdown_clone).await {
+                    Err(e)
+                } else {
+                    Ok(())
+                }
+            }));
+        } else if fd.is_unix() {
+            info!(
+                "Starting NBD server on systemd Unix socket (devices dynamically discovered from .nbd/)"
+            );
+            let nbd_unix_server = NBDServer::new_unix_with_fd(Arc::clone(&fs), unsafe {
+                OwnedFd::from_raw_fd(fd.into_raw_fd())
+            })?;
+            let shutdown_clone = shutdown.clone();
+            handles.push(spawn_named("nbd-unix-server", async move {
+                if let Err(e) = nbd_unix_server.start(shutdown_clone).await {
+                    Err(e)
+                } else {
+                    Ok(())
+                }
+            }));
+        } else {
+            warn!("Unknown fd {} for 9p server", fd.into_raw_fd());
+        }
     }
 
     Ok(handles)
@@ -888,7 +952,13 @@ pub async fn run_server(
     let fs = init_result.fs;
     let heartbeat_shutdown = init_result.heartbeat_shutdown;
 
-    if !db_mode.is_read_only() && settings.servers.nbd.is_some() {
+    if !db_mode.is_read_only()
+        && settings
+            .servers
+            .as_ref()
+            .and_then(|cfg| cfg.nbd.as_ref())
+            .is_some()
+    {
         ensure_nbd_directory(&fs).await?;
     }
 
@@ -933,21 +1003,21 @@ pub async fn run_server(
 
     let nfs_handles = start_nfs_servers(
         Arc::clone(&fs),
-        settings.servers.nfs.as_ref(),
+        settings.servers.as_ref().and_then(|cfg| cfg.nfs.as_ref()),
         shutdown.clone(),
     )
     .await?;
 
     let ninep_handles = start_ninep_servers(
         Arc::clone(&fs),
-        settings.servers.ninep.as_ref(),
+        settings.servers.as_ref().and_then(|cfg| cfg.ninep.as_ref()),
         shutdown.clone(),
     )
     .await?;
 
     let nbd_handles = start_nbd_servers(
         Arc::clone(&fs),
-        settings.servers.nbd.as_ref(),
+        settings.servers.as_ref().and_then(|cfg| cfg.nbd.as_ref()),
         shutdown.clone(),
     )
     .await?;
@@ -989,7 +1059,7 @@ pub async fn run_server(
     #[cfg(feature = "webui")]
     let checkpoint_manager_for_webui = Arc::clone(&checkpoint_manager);
     let rpc_handles = start_rpc_servers(
-        settings.servers.rpc.as_ref(),
+        settings.servers.as_ref().and_then(|cfg| cfg.rpc.as_ref()),
         checkpoint_manager,
         Arc::clone(&fs),
         shutdown.clone(),

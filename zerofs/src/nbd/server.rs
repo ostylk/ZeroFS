@@ -6,6 +6,8 @@ use bytes::BytesMut;
 use deku::prelude::*;
 use nbd_proto::*;
 use std::net::SocketAddr;
+use std::os::fd::OwnedFd;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::{TcpListener, UnixListener};
@@ -18,7 +20,7 @@ const DISCARD_CHUNK_SIZE: usize = 64 * 1024;
 
 pub enum Transport {
     Tcp(TcpListener),
-    Unix(UnixListener),
+    Unix(PathBuf, UnixListener),
 }
 
 pub struct NBDServer {
@@ -35,6 +37,15 @@ impl NBDServer {
         Ok(Self {
             filesystem,
             transport: Transport::Tcp(listener),
+        })
+    }
+
+    pub fn new_tcp_with_fd(filesystem: Arc<ZeroFS>, fd: OwnedFd) -> std::io::Result<Self> {
+        let std_listener = std::net::TcpListener::from(fd);
+        std_listener.set_nonblocking(true)?;
+        Ok(Self {
+            filesystem,
+            transport: Transport::Tcp(TcpListener::from_std(std_listener)?),
         })
     }
 
@@ -55,7 +66,16 @@ impl NBDServer {
 
         Ok(Self {
             filesystem,
-            transport: Transport::Unix(listener),
+            transport: Transport::Unix(path, listener),
+        })
+    }
+
+    pub fn new_unix_with_fd(filesystem: Arc<ZeroFS>, fd: OwnedFd) -> std::io::Result<Self> {
+        let std_listener = std::os::unix::net::UnixListener::from(fd);
+        std_listener.set_nonblocking(true)?;
+        Ok(Self {
+            filesystem,
+            transport: Transport::Unix("-".into(), UnixListener::from_std(std_listener)?),
         })
     }
 
@@ -93,11 +113,8 @@ impl NBDServer {
                     }
                 }
             }
-            Transport::Unix(listener) => {
-                info!(
-                    "NBD server listening on Unix socket {:?}",
-                    listener.local_addr()?
-                );
+            Transport::Unix(path, listener) => {
+                info!("NBD server listening on Unix socket {:?}", path);
 
                 loop {
                     tokio::select! {

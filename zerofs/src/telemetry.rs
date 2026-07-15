@@ -1,4 +1,4 @@
-use crate::config::Settings;
+use crate::config::{ServerConfig, Settings};
 use crate::fs::stats::FileSystemGlobalStats;
 use crate::task::spawn_named;
 use serde::Serialize;
@@ -100,7 +100,12 @@ pub fn send_startup_event(settings: &Settings) {
     };
 
     let backend_type = determine_backend_type(&settings.storage.url);
-    let protocols = determine_protocols(&settings.servers);
+    let protocols = determine_protocols(
+        settings
+            .servers
+            .as_ref()
+            .unwrap_or(&ServerConfig::default()),
+    );
     let version = env!("CARGO_PKG_VERSION").to_string();
     let os = std::env::consts::OS.to_string();
     let arch = std::env::consts::ARCH.to_string();

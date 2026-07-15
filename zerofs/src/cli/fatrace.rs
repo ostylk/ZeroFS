@@ -11,6 +11,8 @@ pub async fn run_fatrace(config_path: PathBuf) -> Result<()> {
 
     let rpc_config = settings
         .servers
+        .as_ref()
+        .context("No servers configured in config file")?
         .rpc
         .as_ref()
         .context("RPC server not configured in config file")?;

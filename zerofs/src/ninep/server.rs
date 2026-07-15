@@ -11,6 +11,7 @@ use ninep_proto::{
     P9_MIN_MESSAGE_SIZE, P9_SIZE_FIELD_LEN, P9Message, Rlerror,
 };
 use std::net::SocketAddr;
+use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
@@ -26,7 +27,7 @@ const TFLUSH_TYPE: u8 = 108;
 
 pub enum Transport {
     Tcp(TcpListener),
-    Unix(UnixListener),
+    Unix(PathBuf, UnixListener),
 }
 
 pub struct NinePServer {
@@ -48,6 +49,16 @@ impl NinePServer {
         })
     }
 
+    pub fn new_with_fd(filesystem: Arc<ZeroFS>, fd: OwnedFd) -> std::io::Result<Self> {
+        let std_listener = std::net::TcpListener::from(fd);
+        std_listener.set_nonblocking(true)?;
+        Ok(Self {
+            filesystem,
+            transport: Transport::Tcp(TcpListener::from_std(std_listener)?),
+            lock_manager: Arc::new(FileLockManager::new()),
+        })
+    }
+
     pub fn new_unix(filesystem: Arc<ZeroFS>, path: PathBuf) -> std::io::Result<Self> {
         let _ = std::fs::remove_file(&path);
 
@@ -60,7 +71,17 @@ impl NinePServer {
 
         Ok(Self {
             filesystem,
-            transport: Transport::Unix(listener),
+            transport: Transport::Unix(path, listener),
+            lock_manager: Arc::new(FileLockManager::new()),
+        })
+    }
+
+    pub fn new_unix_with_fd(filesystem: Arc<ZeroFS>, fd: OwnedFd) -> std::io::Result<Self> {
+        let std_listener = std::os::unix::net::UnixListener::from(fd);
+        std_listener.set_nonblocking(true)?;
+        Ok(Self {
+            filesystem,
+            transport: Transport::Unix("-".into(), UnixListener::from_std(std_listener)?),
             lock_manager: Arc::new(FileLockManager::new()),
         })
     }
@@ -115,11 +136,8 @@ impl NinePServer {
                     }
                 }
             }
-            Transport::Unix(listener) => {
-                info!(
-                    "9P server listening on Unix socket {:?}",
-                    listener.local_addr()?
-                );
+            Transport::Unix(path, listener) => {
+                info!("9P server listening on Unix socket {:?}", path);
 
                 loop {
                     tokio::select! {

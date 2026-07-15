@@ -12,6 +12,8 @@ pub async fn run_otrace(config_path: PathBuf) -> Result<()> {
 
     let rpc_config = settings
         .servers
+        .as_ref()
+        .context("RPC server not configured in config file (no servers block)")?
         .rpc
         .as_ref()
         .context("RPC server not configured in config file")?;
